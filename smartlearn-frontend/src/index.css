@@ -1,0 +1,214 @@
+/* ── 基础重置 & 布局 ────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.6;
+  color: #1e293b;
+  background: #f8fafc;
+  min-height: 100vh;
+}
+
+#root {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem;
+}
+
+/* ── 标题 ────────────────────────────────────────────── */
+
+h1 {
+  text-align: center;
+  font-size: 1.75rem;
+  margin-bottom: 2rem;
+  color: #0f172a;
+}
+
+/* ── 表单卡片 ────────────────────────────────────────── */
+
+form {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* ── 标签 ────────────────────────────────────────────── */
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: #334155;
+}
+
+/* ── 文件选择 ────────────────────────────────────────── */
+
+input[type="file"] {
+  font-size: 0.875rem;
+  color: #475569;
+}
+
+/* ── 文本域 ──────────────────────────────────────────── */
+
+textarea {
+  width: 100%;
+  min-height: 100px;
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  font-size: 0.9rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  resize: vertical;
+  transition: border-color 0.15s;
+}
+
+textarea:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+/* ── 按钮 ────────────────────────────────────────────── */
+
+button {
+  align-self: flex-start;
+  padding: 0.55rem 1.5rem;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #fff;
+  background: #2563eb;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+button:hover {
+  background: #1d4ed8;
+}
+
+button:active {
+  background: #1e40af;
+}
+
+/* 键盘焦点可见 */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid #2563eb;
+  outline-offset: 2px;
+}
+
+/* 禁用状态 */
+button:disabled {
+  background: #94a3b8;
+  color: #e2e8f0;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* ── 状态提示 ────────────────────────────────────────── */
+
+[aria-live="polite"] {
+  text-align: center;
+  font-style: italic;
+  color: #64748b;
+  font-size: 0.9rem;
+  margin-bottom: 0.5rem;
+}
+
+/* ── 错误信息 ────────────────────────────────────────── */
+
+[role="alert"] {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #dc2626;
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  margin-bottom: 1rem;
+}
+
+/* ── 上传结果 ────────────────────────────────────────── */
+
+/* form 后面的普通 p 即 "已上传：N 页" */
+form + p,
+form ~ p:not([role="alert"]):not([aria-live]) {
+  color: #16a34a;
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+/* ── 页码引用 chips ──────────────────────────────────── */
+
+.citation-chip {
+  display: inline-block;
+  background: #e0e7ff;
+  color: #3730a3;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin-right: 0.35rem;
+  margin-bottom: 0.75rem;
+}
+
+/* ── 回答区域 ────────────────────────────────────────── */
+
+section {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+section div:last-child {
+  white-space: pre-wrap;
+  font-size: 0.9rem;
+  line-height: 1.75;
+  color: #1e293b;
+}
+
+/* ── 窄屏适配 ────────────────────────────────────────── */
+
+@media (max-width: 480px) {
+  #root {
+    padding: 1rem 0.75rem;
+  }
+
+  h1 {
+    font-size: 1.35rem;
+    margin-bottom: 1.25rem;
+  }
+
+  form {
+    padding: 1rem;
+    gap: 0.6rem;
+  }
+
+  section {
+    padding: 1rem;
+  }
+
+  button {
+    width: 100%;
+    text-align: center;
+    padding: 0.6rem 1rem;
+  }
+}
