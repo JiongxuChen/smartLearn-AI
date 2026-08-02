@@ -5,8 +5,8 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .services.llm import answer_from_pages
-from .services.pdf import (
+from services.llm import answer_from_pages
+from services.pdf import (
     PDFError,
     PDFInvalidError,
     PDFNoTextError,
