@@ -8,3 +8,4 @@ ipykernel
 sentence-transformers 
 faiss-cpu 
 pandas
+langchain-text-splitters
