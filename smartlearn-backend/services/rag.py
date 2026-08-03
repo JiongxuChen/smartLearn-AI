@@ -359,11 +359,41 @@ def load_model(model_name: str) -> SentenceTransformer:
 # ── 7e. 文本批量编码 ────────────────────────────────────
 
 def embed_texts(
-    model: SentenceTransformer,
-    texts: list[str],
+    texts_or_model: list[str] | SentenceTransformer | str,
+    texts_or_batch_size: list[str] | int | None = None,
     batch_size: int = 32,
+    model_cache_dir: str | Path | None = None,
+    model_name: str | None = None,
 ) -> np.ndarray:
-    """将文本列表编码为归一化的 float32 向量矩阵"""
+    """将文本列表编码为归一化的 float32 向量矩阵
+
+    两种调用方式均支持：
+    1. 旧风格 embed_texts(model, texts, batch_size=32)
+    2. 新风格 embed_texts(texts, model_name="...", model_cache_dir="...", batch_size=1)
+    """
+    # ── 检测调用模式 ─────────────────────────────────
+    if isinstance(texts_or_model, list):
+        # 新风格：第一个参数是 texts
+        texts = texts_or_model
+        # model_name 来自 kwarg 或第二个位置参数
+        resolved_model_name = model_name or texts_or_batch_size
+        if resolved_model_name is None:
+            raise ValueError("需要 model_name 参数")
+        if isinstance(resolved_model_name, int):
+            raise TypeError("第二个参数应为模型名，收到了 int — 请用 model_name= kwarg")
+        model = load_model(str(resolved_model_name))
+    else:
+        # 旧风格：第一个参数是 model 对象或模型名
+        model = texts_or_model
+        texts = texts_or_batch_size
+        if isinstance(model, str):
+            model = load_model(model)
+
+    if batch_size is None:
+        batch_size = 32
+    if isinstance(texts_or_batch_size, int) and texts is None:
+        raise TypeError("请用旧风格 embed_texts(model, texts) 或新风格 embed_texts(texts, model_name=...)")
+
     embeddings = model.encode(
         texts,
         batch_size=batch_size,
@@ -717,6 +747,8 @@ def prepare_rag_document(
         "chunks": bundle["chunks"],
         "chunk_size": chunk_size,
         "embedding_dim": bundle["manifest"]["embedding_dim"],
+        "model_name": model_name,
+        "model_source": resolve_model_source(model_name),
         "history": [],
         "index": {
             "model": model_name,
@@ -730,6 +762,7 @@ def prepare_rag_document(
         "artifacts": {
             "pages": str(paths["pages"]),
             "chunks": str(paths["chunks"]),
+            "embeddings": str(paths["embeddings"]),
             "index": bundle["index_path"],
             "manifest": str(paths["manifest"]),
         },
@@ -1099,3 +1132,216 @@ def evaluate_questions(
         )
 
     return pd.DataFrame(rows)
+
+
+# ═══════════════════════════════════════════════════════════
+# ── 12. Chroma 附录分支（FAISS 的平行替代） ─────────────
+# ═══════════════════════════════════════════════════════════
+
+# ── 12a. 懒加载 chromadb ─────────────────────────────────
+
+def _require_chromadb():
+    """返回 chromadb 模块，未安装时给出明确提示"""
+    try:
+        import chromadb
+        return chromadb
+    except ImportError:
+        raise ImportError(
+            "chromadb 未安装。请执行：\n"
+            "  pip install chromadb"
+        )
+
+
+# ── 12b. 产物目录 ────────────────────────────────────────
+
+def ensure_artifact_dirs(
+    artifact_root: str | Path | None = None,
+) -> dict[str, Path]:
+    """创建并返回全部产物目录（含 Chroma 子目录）"""
+    root = Path(artifact_root or "artifacts/rag")
+    dirs = {
+        "root": root,
+        "raw_pages": root / "raw_pages",
+        "chunks": root / "chunks",
+        "embeddings": root / "embeddings",
+        "indexes": root / "indexes",
+        "reports": root / "reports",
+        "chroma": root / "chroma",
+    }
+    for d in dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
+    return dirs
+
+
+# ── 12c. 构建 Chroma 集合 ────────────────────────────────
+
+def build_chroma_collection(
+    document_id: str,
+    chunks: list[dict],
+    embeddings: np.ndarray,
+    persist_dir: str | Path,
+) -> dict:
+    """用 chunks + embeddings 构建 Chroma 向量集合
+
+    Args:
+        document_id: 唯一文档 ID（作为 collection 名称）
+        chunks: chunk 记录列表
+        embeddings: (N, D) float32 归一化向量
+        persist_dir: Chroma 持久化根目录
+
+    Returns:
+        {"collection_name": str, "item_count": int, "persist_dir": str}
+    """
+    chromadb = _require_chromadb()
+
+    client = chromadb.PersistentClient(path=str(persist_dir))
+
+    # 同名 collection 已存在则删除重建
+    try:
+        client.delete_collection(document_id)
+    except Exception:
+        pass
+
+    collection = client.create_collection(
+        name=document_id,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    # 准备数据
+    ids = [c["chunk_id"] for c in chunks]
+    documents = [c["text"] for c in chunks]
+    metadatas = [
+        {"page": c["page"], "chunk_id": c["chunk_id"]}
+        for c in chunks
+    ]
+
+    collection.add(
+        ids=ids,
+        embeddings=embeddings.tolist(),
+        documents=documents,
+        metadatas=metadatas,
+    )
+
+    return {
+        "collection_name": document_id,
+        "item_count": len(chunks),
+        "persist_dir": str(persist_dir),
+    }
+
+
+# ── 12d. 查询 Chroma 集合 ────────────────────────────────
+
+def query_chroma_collection(
+    document_id: str,
+    query_embedding: np.ndarray,
+    persist_dir: str | Path,
+    top_k: int,
+) -> list[dict]:
+    """对 Chroma 集合执行相似度查询
+
+    Returns:
+        [{chunk_id, page, text, score}, ...] 按 score 降序
+    """
+    chromadb = _require_chromadb()
+    client = chromadb.PersistentClient(path=str(persist_dir))
+    collection = client.get_collection(document_id)
+
+    results = collection.query(
+        query_embeddings=query_embedding.tolist(),
+        n_results=top_k,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    hits: list[dict] = []
+    ids_list = results.get("ids", [[]])[0]
+    docs_list = results.get("documents", [[]])[0]
+    metas_list = results.get("metadatas", [[]])[0]
+    dists_list = results.get("distances", [[]])[0]
+
+    for i in range(len(ids_list)):
+        # Chroma cosine distance → 转为 cosine similarity (1 - distance)
+        dist = float(dists_list[i]) if i < len(dists_list) else 0.0
+        score = round(1.0 - dist, 4)
+        meta = metas_list[i] if i < len(metas_list) else {}
+        text = docs_list[i] if i < len(docs_list) else ""
+
+        hits.append(
+            {
+                "chunk_id": meta.get("chunk_id", ids_list[i]),
+                "page": int(meta.get("page", 0)),
+                "text": text,
+                "score": score,
+            }
+        )
+
+    hits.sort(key=lambda h: h["score"], reverse=True)
+    return hits
+
+
+# ── 12e. Chroma 检索 ─────────────────────────────────────
+
+def search_document_with_chroma(
+    question: str,
+    document: dict,
+    persist_dir: str | Path,
+    top_k: int = 3,
+    batch_size: int = 1,
+) -> list[dict]:
+    """用 Chroma 检索 top-k 命中，返回与 FAISS 检索一致的 shape
+
+    Returns:
+        [{page, chunk_id, text, score}, ...]
+    """
+    model = load_model(document["index"]["model"])
+    q_vec = embed_texts(model, [question], batch_size=batch_size)
+    if q_vec.ndim == 1:
+        q_vec = q_vec.reshape(1, -1)
+
+    return query_chroma_collection(
+        document["document_id"],
+        q_vec,
+        persist_dir,
+        top_k,
+    )
+
+
+# ── 12f. Chroma 回答 ─────────────────────────────────────
+
+def answer_document_with_chroma(
+    document: dict,
+    question: str,
+    persist_dir: str | Path,
+    top_k: int = 3,
+    answer_model: str = "openrouter/free",
+) -> dict:
+    """Chroma 路径的文档问答，返回 {answer, citations, sources}
+
+    与 answer_document 完全一致的返回 shape。
+    """
+    hits = search_document_with_chroma(
+        question, document, persist_dir, top_k=top_k,
+    )
+
+    sources = build_sources(hits)
+
+    # 尝试 LLM
+    answer = None
+    try:
+        from services.llm import answer_from_pages
+
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if api_key:
+            answer = answer_from_pages(hits, question)
+    except Exception:
+        pass
+
+    if answer is None:
+        answer = best_sentence_answer(question, hits)
+
+    citations = extract_citations(answer, hits)
+
+    return {
+        "answer": answer,
+        "citations": citations,
+        "sources": sources,
+    }
