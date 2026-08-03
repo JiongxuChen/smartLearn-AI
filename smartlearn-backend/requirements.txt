@@ -4,3 +4,7 @@ python-multipart
 pypdf
 openai
 python-dotenv
+ipykernel 
+sentence-transformers 
+faiss-cpu 
+pandas

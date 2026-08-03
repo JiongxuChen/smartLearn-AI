@@ -1,7 +1,8 @@
 .env
-venv/
 __pycache__/
 *.pyc
 test_files/
 node_modules/
 dist/
+smartlearn-backend/artifacts/
+
