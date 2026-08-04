@@ -1,16 +1,22 @@
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const CHAT_ID = "day2-demo";
 
 /**
  * 上传 PDF 文件到后端
- * @param {File} file - 用户选择的 PDF 文件
- * @returns {Promise<{chat_id: string, pages: Array<{page: number, text: string}>}>}
+ * @param {File} file
+ * @param {string} chatId
+ * @param {object} config - { chunk_mode, chunk_size, overlap, model_name }
  */
-async function uploadPDF(file) {
+async function uploadPDF(file, chatId, config = {}) {
   const formData = new FormData();
   formData.append("file", file);
 
-  const res = await fetch(`${API}/upload?chat_id=${CHAT_ID}`, {
+  const params = new URLSearchParams({ chat_id: chatId });
+  if (config.chunk_mode) params.set("chunk_mode", config.chunk_mode);
+  if (config.chunk_size) params.set("chunk_size", config.chunk_size);
+  if (config.overlap != null) params.set("overlap", config.overlap);
+  if (config.model_name) params.set("model_name", config.model_name);
+
+  const res = await fetch(`${API}/upload?${params}`, {
     method: "POST",
     body: formData,
   });
@@ -25,22 +31,47 @@ async function uploadPDF(file) {
 
 /**
  * 向已上传的 PDF 提问题
- * @param {string} message - 用户问题
- * @returns {Promise<{chat_id: string, answer: string}>}
+ * @param {string} message
+ * @param {string} chatId
+ * @param {object} config - { top_k, candidate_pool, answer_model, retrieval_backend }
  */
-async function askQuestion(message) {
-  const res = await fetch(`${API}/chat?chat_id=${CHAT_ID}`, {
+async function askQuestion(message, chatId, config = {}) {
+  const body = {
+    message,
+    ...(config.top_k != null && { top_k: config.top_k }),
+    ...(config.candidate_pool != null && { candidate_pool: config.candidate_pool }),
+    ...(config.answer_model && { answer_model: config.answer_model }),
+    ...(config.retrieval_backend && { retrieval_backend: config.retrieval_backend }),
+  };
+
+  const res = await fetch(`${API}/chat?chat_id=${chatId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    throw new Error(body?.detail || `对话失败（${res.status}）`);
+    const errBody = await res.json().catch(() => null);
+    throw new Error(errBody?.detail || `对话失败（${res.status}）`);
   }
 
   return res.json();
 }
 
-export { API, CHAT_ID, uploadPDF, askQuestion };
+function getPdfUrl(chatId) {
+  return `${API}/documents/${chatId}/file`;
+}
+
+async function resetChat(chatId) {
+  const res = await fetch(`${API}/chat/reset?chat_id=${chatId}`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail || `重置失败（${res.status}）`);
+  }
+  return res.json();
+}
+
+export { API, uploadPDF, askQuestion, getPdfUrl, resetChat };
+

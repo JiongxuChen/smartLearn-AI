@@ -1,38 +1,52 @@
 import { useState } from "react";
-import { uploadPDF, askQuestion } from "./api";
+import { uploadPDF } from "./api";
+import PdfPreview from "./PdfPreview";
+import ChatPanel from "./ChatPanel";
+import ConfigPanel from "./ConfigPanel";
 
-/** 从 LLM 回答中提取 [Page N] 和 [Pages X-Y] 引用，去重排序 */
-function extractCitations(text) {
-  const re = /\[Pages?\s*(\d+)(?:\s*[-–]\s*(\d+))?\]/g;
-  const pages = new Set();
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    const start = parseInt(m[1], 10);
-    const end = m[2] ? parseInt(m[2], 10) : start;
-    for (let p = start; p <= end; p++) pages.add(p);
-  }
-  return [...pages].sort((a, b) => a - b);
-}
+const CHAT_ID = "day3-demo";
+
+const DEFAULT_CONFIG = {
+  chunk_mode: "character_overlap",
+  chunk_size: 700,
+  overlap: 120,
+  model_name: "sentence-transformers/all-MiniLM-L6-v2",
+  top_k: 3,
+  candidate_pool: 60,
+  answer_model: "openrouter/free",
+  retrieval_backend: "faiss",
+};
 
 export default function App() {
-  const [file, setFile] = useState(null);       // 用户选择的 PDF 文件
-  const [upload, setUpload] = useState(null);    // 上传结果 { chat_id, pages }
-  const [message, setMessage] = useState("");    // 用户输入的问题
-  const [answer, setAnswer] = useState(null);    // 回答 { text, citations }
-  const [status, setStatus] = useState("");      // "Uploading..." / "Asking..." / ""
-  const [error, setError] = useState("");        // 错误信息
+  const [file, setFile] = useState(null);
+  const [uploaded, setUploaded] = useState(false);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const [pageCount, setPageCount] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pdfJumpKey, setPdfJumpKey] = useState(0);
+  const [chatKey, setChatKey] = useState(0);
+  const [config, setConfig] = useState(DEFAULT_CONFIG);
 
   const busy = status !== "";
 
-  /** 上传 PDF */
+  /** 上传 PDF — 带上分块和嵌入配置 */
   async function handleUpload() {
     setError("");
     setStatus("Uploading...");
-    setUpload(null);
-    setAnswer(null);
+    setUploaded(false);
     try {
-      const result = await uploadPDF(file);
-      setUpload(result);
+      const result = await uploadPDF(file, CHAT_ID, {
+        chunk_mode: config.chunk_mode,
+        chunk_size: config.chunk_size,
+        overlap: config.overlap,
+        model_name: config.model_name,
+      });
+      setPageCount(result.pages);
+      setCurrentPage(1);
+      setPdfJumpKey((k) => k + 1);
+      setChatKey((k) => k + 1);
+      setUploaded(true);
       setStatus("");
     } catch (err) {
       setError(err.message);
@@ -40,104 +54,79 @@ export default function App() {
     }
   }
 
-  /** 向 PDF 提问 */
-  async function handleAsk() {
-    setError("");
-    setStatus("Asking...");
-    try {
-      const result = await askQuestion(message.trim());
-      setAnswer({
-        text: result.answer,
-        citations: extractCitations(result.answer),
-      });
-      setStatus("");
-    } catch (err) {
-      setError(err.message);
-      setStatus("");
-    }
+  function handleJumpToPage(page) {
+    setCurrentPage(page);
+    setPdfJumpKey((k) => k + 1);
   }
 
   return (
-    <>
+    <div className="app">
       <h1>SmartLearn AI</h1>
 
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!busy && file) handleUpload();
-        }}
-      >
-        {/* ── PDF 上传区 ── */}
-        <label>
-          PDF 文件：
-          <input
-            type="file"
-            accept=".pdf"
-            onChange={(e) => setFile(e.target.files[0] || null)}
-          />
-        </label>
-        <button type="submit" disabled={!file || busy}>
-          上传
-        </button>
-      </form>
-
-      {/* ── 状态提示 ── */}
-      {status && <p aria-live="polite">{status}</p>}
-
-      {/* ── 错误信息 ── */}
-      {error && (
-        <p role="alert" style={{ color: "red" }}>
-          {error}
-        </p>
-      )}
-
-      {/* ── 上传结果 ── */}
-      {upload && (
-        <p>
-          已上传：{upload.pages.length} 页
-        </p>
-      )}
-
-      {/* ── 问答区 ── */}
-      {upload && (
+      {/* ── 顶部栏：上传 + 配置 ── */}
+      <div className="top-bar">
         <form
+          className="upload-form"
           onSubmit={(e) => {
             e.preventDefault();
-            if (!busy && message.trim()) handleAsk();
+            if (!busy && file) handleUpload();
           }}
         >
           <label>
-            你的问题：
-            <textarea
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              placeholder="基于 PDF 内容提问…"
+            PDF 文件：
+            <input
+              type="file"
+              accept=".pdf"
+              onChange={(e) => setFile(e.target.files[0] || null)}
             />
           </label>
-          <button type="submit" disabled={!message.trim() || busy}>
-            提问
+          <button type="submit" disabled={!file || busy}>
+            {uploaded ? "重新上传" : "上传"}
           </button>
-        </form>
-      )}
-
-      {/* ── 回答结果 ── */}
-      {answer && (
-        <section>
-          {/* 页码引用 chips */}
-          {answer.citations.length > 0 && (
-            <div>
-              {answer.citations.map((page) => (
-                <span key={page} className="citation-chip">
-                  Page {page}
-                </span>
-              ))}
-            </div>
+          {uploaded && (
+            <span className="upload-info">已加载 {pageCount} 页</span>
           )}
+        </form>
 
-          {/* 回答正文 */}
-          <div style={{ whiteSpace: "pre-wrap" }}>{answer.text}</div>
-        </section>
+        <ConfigPanel
+          config={config}
+          onChange={setConfig}
+          disabled={busy}
+        />
+      </div>
+
+      {/* 状态 & 错误 */}
+      {status && <p aria-live="polite" className="status-text">{status}</p>}
+      {error && <p role="alert" className="error-text">{error}</p>}
+
+      {/* ── 工作区（上传后显示） ── */}
+      {uploaded && (
+        <div className="workspace">
+          <div className="workspace-left">
+            <PdfPreview
+              chatId={CHAT_ID}
+              targetPage={currentPage}
+              jumpKey={pdfJumpKey}
+            />
+          </div>
+          <div className="workspace-right">
+            <ChatPanel
+              key={chatKey}
+              chatId={CHAT_ID}
+              enabled={uploaded}
+              disabled={busy}
+              onBusy={(b) => setStatus(b ? "Asking..." : "")}
+              onJumpToPage={handleJumpToPage}
+              config={{
+                top_k: config.top_k,
+                candidate_pool: config.candidate_pool,
+                answer_model: config.answer_model,
+                retrieval_backend: config.retrieval_backend,
+              }}
+            />
+          </div>
+        </div>
       )}
-    </>
+    </div>
   );
 }

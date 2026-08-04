@@ -920,9 +920,13 @@ def best_sentence_answer(question: str, hits: list[dict]) -> str:
                 best_page = hit["page"]
 
     if not best_sentence:
-        # 回退：返回第一个 hit 的前 200 字
-        best_sentence = hits[0]["text"][:200]
-        best_page = hits[0]["page"]
+        # 无关键词命中 → 返回 FAISS 得分最高的 chunk 摘要 + 提示
+        top = hits[0]
+        preview = top["text"][:150]
+        return (
+            f"（本地搜索未找到精确匹配，以下为语义最相似的片段，建议配置 OPENROUTER_API_KEY 以获得准确回答）\n\n"
+            f"{preview} (Page {top['page']}, score={top['score']:.2f})"
+        )
 
     return f"{best_sentence} (Page {best_page})"
 
@@ -985,12 +989,22 @@ def answer_document(
 ) -> dict:
     """对一份已准备好的文档提问，检索 + 回答
 
-    - 有 OpenRouter API key → 用 LLM（传入检索到的 chunks）
+    - 有 OpenRouter API key → 用 LLM 对检索 chunks + 对话历史回答
     - 无 API key → 本地 best_sentence_answer 作为轻量回退
     """
+    history = document.get("history", [])
+
+    # 有历史时，把上一轮问题拼入检索查询（只用问题，避免长答案淹没新问题）
+    search_query = question
+    if history:
+        prev = history[-1]
+        prev_q = prev.get("question", "")
+        if prev_q:
+            search_query = f"{prev_q}\n{question}"
+
     # 检索
     hits = search_document(
-        question, document,
+        search_query, document,
         top_k=top_k, candidate_pool=candidate_pool,
     )
 
@@ -998,14 +1012,33 @@ def answer_document(
 
     # 尝试 LLM 回答
     answer = None
-    try:
-        from services.llm import answer_from_pages
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if api_key:
+        try:
+            from openai import OpenAI
 
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if api_key:
-            answer = answer_from_pages(hits, question)
-    except Exception:
-        pass
+            prompt = build_grounded_user_prompt(question, hits, history)
+            client = OpenAI(
+                api_key=api_key,
+                base_url="https://openrouter.ai/api/v1",
+            )
+            response = client.chat.completions.create(
+                model=answer_model,
+                temperature=0.0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            answer = response.choices[0].message.content or ""
+        except Exception as e:
+            import traceback
+            err_name = type(e).__name__
+            print(f"[LLM ERROR] {err_name}: {e}")
+            traceback.print_exc()
+            # 限流时在 answer 里给用户提示
+            if "429" in str(e) or "Rate limit" in str(e):
+                answer = (
+                    "（OpenRouter 免费额度已用完，明天自动重置。"
+                    "可在配置面板中更换 LLM 模型或充值。）"
+                )
 
     # 回退：本地抽取
     if answer is None:
@@ -1194,18 +1227,26 @@ def build_chroma_collection(
     """
     chromadb = _require_chromadb()
 
+    # Chroma 集合名要求 3-512 字符，只含 [a-zA-Z0-9._-]
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", document_id)
+    if len(safe_name) < 3:
+        safe_name = f"doc_{safe_name}"
+
     client = chromadb.PersistentClient(path=str(persist_dir))
 
     # 同名 collection 已存在则删除重建
     try:
-        client.delete_collection(document_id)
+        client.delete_collection(safe_name)
     except Exception:
         pass
 
     collection = client.create_collection(
-        name=document_id,
+        name=safe_name,
         metadata={"hnsw:space": "cosine"},
     )
+
+    # 更新 document_id 为安全名（后续查询用同一名称）
+    document_id = safe_name
 
     # 准备数据
     ids = [c["chunk_id"] for c in chunks]
@@ -1243,8 +1284,14 @@ def query_chroma_collection(
         [{chunk_id, page, text, score}, ...] 按 score 降序
     """
     chromadb = _require_chromadb()
+
+    # 与 build 一致的名称清洗
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", document_id)
+    if len(safe_name) < 3:
+        safe_name = f"doc_{safe_name}"
+
     client = chromadb.PersistentClient(path=str(persist_dir))
-    collection = client.get_collection(document_id)
+    collection = client.get_collection(safe_name)
 
     results = collection.query(
         query_embeddings=query_embedding.tolist(),
@@ -1345,3 +1392,163 @@ def answer_document_with_chroma(
         "citations": citations,
         "sources": sources,
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# ── 13. Web 服务层接口 ───────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+
+# ── 13a. bytes → pages（供上传路由使用）───────────────────
+
+def extract_pages_from_bytes_for_rag(pdf_bytes: bytes) -> list[dict]:
+    """从 PDF 字节流提取清洗后的 {page, text} 列表
+
+    与 extract_pages_for_rag 使用同一套 clean_text 管线。
+    """
+    from io import BytesIO
+    from pypdf import PdfReader
+
+    reader = PdfReader(BytesIO(pdf_bytes))
+    records: list[dict] = []
+    for page_number, page in enumerate(reader.pages, start=1):
+        raw = page.extract_text() or ""
+        cleaned = clean_text(raw)
+        if cleaned:
+            records.append({"page": page_number, "text": cleaned})
+    return records
+
+
+# ── 13b. 上传时构建服务器文档记录 ─────────────────────────
+
+def prepare_rag_chat_record(
+    chat_id: str,
+    filename: str,
+    pdf_bytes: bytes | None = None,
+    pages: list[dict] | None = None,
+    upload_root: str | Path | None = None,
+    chunk_mode: str = "character_overlap",
+    chunk_size: int = 700,
+    overlap: int = 120,
+    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    batch_size: int = 32,
+    artifact_root: str | Path | None = None,
+) -> dict:
+    """上传时一步构建 documents[chat_id] 记录
+
+    保存 PDF 到磁盘 → 抽取页面 → 构建 RAG 档案。
+    pdf_bytes 和 pages 至少提供一个。
+    """
+    if pages is None and pdf_bytes is None:
+        raise ValueError("需要 pdf_bytes 或 pages 至少提供一个")
+
+    if upload_root is None:
+        upload_root = "uploads"
+
+    # 保存 PDF
+    upload_dir = Path(upload_root) / chat_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    file_path = upload_dir / filename
+    if pdf_bytes is not None:
+        file_path.write_bytes(pdf_bytes)
+
+    # 抽取页面
+    if pages is None:
+        pages = extract_pages_from_bytes_for_rag(pdf_bytes)
+
+    # 委托 prepare_rag_document 构建 RAG 档案
+    doc = prepare_rag_document(
+        document_id=chat_id,
+        filename=filename,
+        pages=pages,
+        chunk_mode=chunk_mode,
+        chunk_size=chunk_size,
+        overlap=overlap,
+        model_name=model_name,
+        batch_size=batch_size,
+        artifact_root=artifact_root,
+    )
+
+    # 补充上传专有字段
+    doc["saved_pdf_path"] = str(file_path)
+    return doc
+
+
+# ── 13c. 前端上传响应 ─────────────────────────────────────
+
+def build_upload_response(document: dict) -> dict:
+    """从服务端文档记录提取上传成功响应"""
+    return {
+        "chat_id": document["document_id"],
+        "filename": document["filename"],
+        "page_count": len(document["pages"]),
+        "chunk_count": len(document["chunks"]),
+    }
+
+
+# ── 13d. 构建 grounded prompt ─────────────────────────────
+
+def build_grounded_user_prompt(
+    question: str,
+    hits: list[dict],
+    history: list[dict] | None = None,
+) -> str:
+    """用检索到的 chunks + 可选对话历史构建 grounded prompt"""
+    chunks_text = "\n\n".join(
+        f"[Page {h['page']}] {h['text']}" for h in hits
+    )
+
+    history_text = ""
+    if history:
+        recent = history[-3:]  # 只取最近 3 轮避免过长
+        turns = "\n".join(
+            f"用户: {t['question']}\n助手: {t['answer']}" for t in recent
+        )
+        history_text = f"最近对话：\n{turns}\n\n"
+
+    return (
+        "你只能根据下方 PDF 片段回答问题。如果片段中找不到答案，"
+        "请明确说「文档未提供足够信息」。引用时使用 [Page N] 标记。\n\n"
+        f"{history_text}"
+        f"PDF 片段：\n{chunks_text}\n\n"
+        f"问题：{question}"
+    )
+
+
+# ── 13e. 带对话历史的问答 ────────────────────────────────
+
+def answer_document_turn(
+    document: dict,
+    question: str,
+    top_k: int = 3,
+    candidate_pool: int = 60,
+    answer_model: str = "openrouter/free",
+) -> dict:
+    """answer_document + 自动追加 history，返回结果含更新后的历史"""
+    result = answer_document(
+        document, question,
+        top_k=top_k, candidate_pool=candidate_pool,
+        answer_model=answer_model,
+    )
+    result["history"] = append_history(document, question, result)
+    return result
+
+
+# ── 13f. POST /chat 路由级接口 ────────────────────────────
+
+def answer_chat_turn(
+    document: dict,
+    message: str,
+    top_k: int = 3,
+    candidate_pool: int = 60,
+    answer_model: str = "openrouter/free",
+) -> dict:
+    """路由层问答入口：检索 → LLM → 记录历史 → 返回
+
+    供 main.py POST /chat 路由调用，
+    返回 {answer, citations, sources}。
+    """
+    return answer_document_turn(
+        document, message,
+        top_k=top_k, candidate_pool=candidate_pool,
+        answer_model=answer_model,
+    )
